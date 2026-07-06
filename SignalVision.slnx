@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SignalVision/SignalVision.csproj" />
+  <Project Path="Test/Test.csproj" Id="7fa29f8e-e302-4a81-8ea6-b0e12eabe90b" />
+</Solution>
