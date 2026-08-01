@@ -1,8 +1,25 @@
 {
-  "PDF": "c:/temp/CaseSummaryData _20260222 (masked).pdf",
+  "PDFPath": "c:/temp/CaseSummaryData _20260222 (masked).pdf",
+  "OutputBasePath": "c:/temp/",
+  "DeleteExistingOutputFolder": true,
+  "JPEGVerticalFlip": true,
   "WindowsPanel": {
-    "TitleColor": "#0072c5",
-    "TitleColorTolerance": 50
+    "ActiveTitleColor": [ "#005699" ],
+    "InActiveTitleColor": [ "#0072C5" ],
+    "TitleColorTolerance": 50,
+    "TitleDensity": 0.5,
+    "MinimumHeight": 10,
+    "MinimumWidth": 100,
+    "BlurRadius": 1,
+    "GraphTitleColor": [ "#d9dadc" ],
+    "GraphSeparatorColor": [ "#8e8e8e" ],
+    "GraphSeparatorMinWidth": 3
+  },
+  "TargetGraphTitles": [ "SSEP UN L (W", "SSEP PTN L (W", "SSEP UN R (W", "SSEP PTN R (W" ],
+  "OCR": {
+    "Provider": "Paddle", //Paddle, Microsoft
+    "Scale": 5,
+    "MaxPreparedDimension": 2400
   }
 
 }

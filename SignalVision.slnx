@@ -1,4 +1,15 @@
 <Solution>
-  <Project Path="SignalVision/SignalVision.csproj" />
-  <Project Path="Test/Test.csproj" Id="7fa29f8e-e302-4a81-8ea6-b0e12eabe90b" />
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="SignalVision/SignalVision.csproj">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
+  <Project Path="Test/Test.csproj" Id="7fa29f8e-e302-4a81-8ea6-b0e12eabe90b">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
+  <Project Path="UnitTest/UnitTest.csproj" Id="176eafb1-c406-445d-9a84-23b5638d8088">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
 </Solution>
