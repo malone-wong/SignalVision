@@ -9,98 +9,16 @@ using YamlDotNet.Core;
 
 namespace SignalVision
 {
-    public class GraphVerticalRange
-    {
-        public int X { get; set; } = -1;
-        public int FromY { get; set; } = -1;
-        public int ToY { get; set; } = -1;
-
-        public GraphVerticalRange(int x, int y) { 
-            X = x;
-            FromY = y;
-            ToY = y;
-        }
-
-        public GraphVerticalRange(int x, int fromY, int toY)
-        {
-            X = x;
-            FromY = fromY;
-            ToY = toY;
-        }
-
-        public void Add(int y)
-        {
-            if (y < FromY)
-            {
-                FromY = y;
-            }
-            else
-            {
-                ToY = y;
-            }
-        }
-    }
-
-    public class Curve
-    {
-        public string Color { get; set; } = string.Empty;
-        public List<GraphVerticalRange> VerticalRanges { get; set; } = new List<GraphVerticalRange>();
-
-        public Curve(int x, int y)
-        {
-            VerticalRanges.Add(new GraphVerticalRange(x, y));
-        }
-        public bool IsNeighbor(int x, int y)
-        {
-            foreach (GraphVerticalRange range in VerticalRanges)
-            {
-                if (range.X == x || range.X == x - 1)
-                {
-                    return (range.FromY - 1 <= y) || (range.ToY + 1 >= y);
-                }
-            }
-            return false;
-        }
-
-        public void Add(int x, int y)
-        {
-            foreach (GraphVerticalRange range in VerticalRanges)
-            {
-                if (range.X == x)
-                {
-                    range.Add(y);
-                    break;
-                }
-            }
-        }
-
-        public void Add(GraphVerticalRange range)
-        {
-            VerticalRanges.Add(range);
-        }
-
-        public override string ToString()
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.Append($"[Color: {Color}] ");
-            sb.Append($"[Count: {VerticalRanges.Count}] ");
-            if (VerticalRanges.Count > 0)
-            {
-                sb.Append($"[First FromY: {VerticalRanges[0].FromY}] ");
-                sb.Append($"[First x: {VerticalRanges[0].X}] ");
-            }
-            return sb.ToString();
-        }
-    }
-
     public class Graph
     {
         private static readonly Rgba32 TealCurveColor = new(0xa6, 0xec, 0xe1);
         private static readonly Rgba32 TealCurveAlternateColor = new(0x2a, 0xf2, 0xe8);
         private static readonly Rgba32 PurpleCurveColor = new(0xd9, 0x33, 0xc3);
+        private const string TealCurveHexColor = "#a6ece1";
         private const int CurveColorTolerance = 100;
         private const int MaximumCurveStep = 10;
-        private const int MaximumReconnectYDifference = 20;
+        private const int MaximumReconnectXDifference = 5;
+        private const int MaximumReconnectYDifference = 5;
         private const int MaximumCurveStartX = 2;
         private const int GridColorChannelTolerance = 85;
         private const int MinimumGridColor = 85;
@@ -126,16 +44,61 @@ namespace SignalVision
             Bounds = bounds;
             Parent = parent;
             DataBounds = GetDataBounds();
+            ApplyBilateralFilter();
             Sanitize();
             SaveDataBounds(Path.Combine(OutputFolder, $"databounds_page_{PageNumber}_image_{ImageIndex}_panel_{PanelIndex}_Data_{Index}.png"));//TODO:
-            GetCurves();
+            GetCurves2();
+            //GetCurves();
             //Console.WriteLine("done");
+        }
+
+        private void ApplyBilateralFilter()
+        {
+            SanitizedImage?.Dispose();
+            SanitizedImage = Parent.Image?.Clone();
+            if (SanitizedImage is null || DataBounds.IsEmpty)
+                return;
+
+            Rectangle filterBounds = Rectangle.Intersect(
+                DataBounds,
+                new Rectangle(0, 0, SanitizedImage.Width, SanitizedImage.Height));
+            if (filterBounds.IsEmpty)
+                return;
+
+            // Process only the graph data region and use PNG for the temporary
+            // conversion so the filter stage introduces no new JPEG artifacts.
+            using Image<Rgba32> graphData = SanitizedImage.Clone(
+                context => context.Crop(filterBounds));
+            using MemoryStream input = new();
+            graphData.SaveAsPng(input);
+
+            using OpenCvSharp.Mat source = OpenCvSharp.Cv2.ImDecode(
+                input.ToArray(),
+                OpenCvSharp.ImreadModes.Color);
+            using OpenCvSharp.Mat filtered = new();
+
+            // Suppress small JPEG color variations while retaining curve edges.
+            OpenCvSharp.Cv2.BilateralFilter(
+                source,
+                filtered,
+                d: 5,
+                sigmaColor: 50,
+                sigmaSpace: 50);
+
+            OpenCvSharp.Cv2.ImEncode(".png", filtered, out byte[] encoded);
+            using Image<Rgba32> filteredGraphData =
+                SixLabors.ImageSharp.Image.Load<Rgba32>(encoded);
+            SanitizedImage.Mutate(context => context.DrawImage(
+                filteredGraphData,
+                filterBounds.Location,
+                1f));
+
+            SanitizedImage.SaveAsPng(Path.Combine(OutputFolder, $"Sanitized_page_{PageNumber}_image_{ImageIndex}_panel_{PanelIndex}_Data_{Index}.png"));//TODO
         }
 
         private void Sanitize()
         {
-            SanitizedImage?.Dispose();
-            SanitizedImage = Parent.Image?.Clone();
+            SanitizedImage ??= Parent.Image?.Clone();
             if (SanitizedImage is null || DataBounds.IsEmpty)
                 return;
 
@@ -159,7 +122,7 @@ namespace SignalVision
             HashSet<int> gridColumns = [];
             HashSet<int> gridRows = [];
 
-            //SanitizedImage.SaveAsPng("c:/temp/malone.png");//TODO
+            //SanitizedImage.SaveAsPng(Path.Combine(OutputFolder, $"databounds_page_{PageNumber}_image_{ImageIndex}_panel_{PanelIndex}_Data_{Index}.png"));//TODO
             for (int x = sanitizeBounds.Left; x < sanitizeBounds.Right; x++)
             {
                 int gridPixelCount = 0;
@@ -314,6 +277,290 @@ namespace SignalVision
             return Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
         }
 
+        private bool IsCurvePixel(Rgba32 pixel)
+        {
+            bool isTealCurveColor = IsColorWithinTolerance(pixel, TealCurveColor);
+            bool isTealCurveAlternateColor = IsColorWithinTolerance(pixel, TealCurveAlternateColor);
+            bool isPurpleCurveColor = IsPurpleCurveColor(pixel);// IsColorWithinTolerance(pixel, PurpleCurveColor);
+
+            return isTealCurveColor || isTealCurveAlternateColor || isPurpleCurveColor;
+        }
+
+        private bool IsPurpleCurveColor(Rgba32 pixel)
+        {
+            bool flag = IsColorWithinTolerance(pixel, PurpleCurveColor);
+            if (flag) return flag;
+
+            int purpleCurveColorSum = PurpleCurveColor.R + PurpleCurveColor.G + PurpleCurveColor.B;
+            int pixelSum = pixel.R + pixel.G + pixel.B;
+            if (pixelSum < 100 || pixelSum > 400) return false;
+            float purpleR = (float)PurpleCurveColor.R / purpleCurveColorSum;
+            float purpleG = (float)PurpleCurveColor.G / purpleCurveColorSum;
+            float purpleB = (float)PurpleCurveColor.B / purpleCurveColorSum;
+            float pixelR = (float)pixel.R / pixelSum;
+            float pixelG = (float)pixel.G / pixelSum;
+            float pixelB = (float)pixel.B / pixelSum;
+            float deltaR = Math.Abs(purpleR - pixelR);
+            float deltaG = Math.Abs(purpleG - pixelG);
+            float deltaB = Math.Abs(purpleB - pixelB);
+            float tolerance = 0.2f; // Adjust this value as needed
+
+            return deltaR < tolerance && deltaG < tolerance && deltaB < tolerance;
+        }
+
+        private void GetCurves2()
+        {
+            Curves.Clear();
+            Image<Rgba32>? image = SanitizedImage;
+            if (image is null || DataBounds.IsEmpty)
+                return;
+
+            Rectangle scanBounds = Rectangle.Intersect(DataBounds, new Rectangle(0, 0, image.Width, image.Height));
+            if (scanBounds.IsEmpty)
+                return;
+
+            for (int x = scanBounds.Left; x < scanBounds.Right; x++)
+            {
+                List<GraphVerticalRange> columnBars = [];
+                for (int y = scanBounds.Top; y < scanBounds.Bottom; y++)
+                {
+                    Rgba32 color = image[x, y];
+                    string colorName = "Unknown";
+
+                    if (x == 10 && y == 335)
+                    {
+                        Console.WriteLine("test");//TODO:
+                    }
+
+                    double baselineScore = IsBaselineColor(color);
+                    double curveScore = IsCurveColor(color);
+                    double markerScore = IsMarkerColor(color);
+                    if (baselineScore > 0.90 || (baselineScore > 0.80 && markerScore > 0.80))
+                        colorName = "Baseline";
+                    else if (curveScore > 0.90 || (curveScore > 0.80 && markerScore > 0.80))
+                        colorName = "Curve";
+                    else if (markerScore > 0.90)
+                        colorName = "Marker";
+
+                    if (colorName != "Unknown")
+                    {
+                        GraphPixel pixel = new()
+                        {
+                            X = x,
+                            Y = y,
+                            Color = color,
+                            Distance = baselineScore,
+                            ColorName = colorName
+                        };
+                        if (columnBars.Count > 0)
+                        {
+                            GraphVerticalRange lastBar = columnBars[^1];
+                            GraphPixel lastPixel = lastBar.Pixels[^1];
+                            if (lastPixel.Y + 1 == y && lastPixel.ColorName == pixel.ColorName)
+                            {
+                                lastBar.Add(pixel);
+                            }
+                            else
+                            {
+                                GraphVerticalRange graphPixels = new(pixel);
+                                columnBars.Add(graphPixels);
+                            }
+                        }
+                        else
+                        {
+                            GraphVerticalRange graphPixels = new(pixel);
+                            columnBars.Add(graphPixels);
+                        }
+                    }
+                }
+
+                if (columnBars.Count != 2)
+                {
+                    Console.WriteLine($"Column {x} has {columnBars.Count} bars");//TODO:
+                }
+                if (x == 109)
+                {
+                    Console.WriteLine("test");//TODO:
+                }
+
+                if (x == scanBounds.Left)
+                {
+                    foreach(GraphVerticalRange bar in columnBars)
+                    {
+                        Curve curve = new(bar);
+                        Curves.Add(curve);
+                    }
+                }
+                else
+                {
+                    foreach (GraphVerticalRange bar in columnBars)
+                    {
+                        if (bar.Pixels[0].X==12 && bar.Pixels[0].Y == 337)
+                        {
+                            Console.WriteLine("test");//TODO:
+                        }
+                        Curve? nearestCurve = null;
+                        int longestBarLength = -1;
+                        int bestOverlap = -1;
+                        int bestYGap = int.MaxValue;
+                        int bestXGap = int.MaxValue;
+
+                        int barTop = bar.Pixels[0].Y;
+                        int barBottom = bar.Pixels[^1].Y;
+
+                        foreach (Curve curve in Curves)
+                        {
+                            GraphVerticalRange lastBar = curve.VerticalRanges[^1];
+                            if (curve.VerticalRanges.Count==2 && curve.VerticalRanges[0].Pixels[0].X==8 && curve.VerticalRanges[0].Pixels[0].Y == 339)
+                            {
+                                Console.WriteLine("test");//TODO:
+                            }
+
+                            // Allow the curve to bridge columns whose bar was lost to
+                            // JPEG compression. The most recent bar must still be to
+                            // the left, which also prevents two bars at the same X
+                            // coordinate from attaching to one curve.
+                            int xGap = x - lastBar.Pixels[0].X;
+                            if (xGap < 1 || xGap > MaximumReconnectXDifference)
+                                continue;
+
+                            int lastTop = lastBar.Pixels[0].Y;
+                            int lastBottom = lastBar.Pixels[^1].Y;
+
+                            // Number of shared Y coordinates, inclusive.
+                            int overlap = Math.Max(
+                                0,
+                                Math.Min(barBottom, lastBottom) -
+                                Math.Max(barTop, lastTop) + 1);
+
+                            // Distance between the two vertical ranges.
+                            int yGap;
+                            if (overlap > 0)
+                            {
+                                yGap = 0;
+                            }
+                            else if (barBottom < lastTop)
+                            {
+                                yGap = lastTop - barBottom;
+                            }
+                            else
+                            {
+                                yGap = barTop - lastBottom;
+                            }
+
+                            if (overlap == 0 &&
+                                yGap > MaximumReconnectYDifference)
+                            {
+                                continue;
+                            }
+
+                            int lastBarLength = lastBar.Pixels.Count;
+
+                            if (overlap > bestOverlap ||
+                                (overlap == bestOverlap && yGap < bestYGap) ||
+                                (overlap == bestOverlap &&
+                                 yGap == bestYGap &&
+                                 xGap < bestXGap) ||
+                                (overlap == bestOverlap &&
+                                 yGap == bestYGap &&
+                                 xGap == bestXGap &&
+                                 lastBarLength > longestBarLength))
+                            {
+                                nearestCurve = curve;
+                                longestBarLength = lastBarLength;
+                                bestOverlap = overlap;
+                                bestYGap = yGap;
+                                bestXGap = xGap;
+                            }
+                        }
+
+                        if (nearestCurve is not null)
+                        {
+                            nearestCurve.VerticalRanges.Add(bar);
+                        }
+                        else if (x-5 < scanBounds.Left)
+                        {
+                            // Optional: start a new curve when no previous-column match exists.
+                            Curves.Add(new Curve(bar));
+                        }
+                    }
+                }
+            }
+            Console.WriteLine($"test");
+        }
+
+        public static double RatioDistance(double r1, double g1, double b1, double r2, double g2, double b2)
+        {
+            double dr = r1 - r2;
+            double dg = g1 - g2;
+            double db = b1 - b2;
+
+            return Math.Sqrt(
+                dr * dr +
+                dg * dg +
+                db * db);
+        }
+
+        private double MatchColor(Rgba32 color, Rgba32 target)
+        {
+            int targetSum = target.R + target.G + target.B;
+            int pixelSum = color.R + color.G + color.B;
+
+            if (targetSum == 0 || pixelSum == 0)
+                return color.Equals(target) ? 1.0 : 0.0;
+
+            // Filter pixels whose overall brightness differs too much.
+            double brightnessDelta = Math.Abs(pixelSum - targetSum) / (255.0 * 3.0);
+
+            const double maxBrightnessDelta = 0.12; // Tune between 0.08–0.15
+            if (brightnessDelta > maxBrightnessDelta)
+                return 0.0;
+
+            // Remove the neutral component before comparing hue. Anti-aliasing can
+            // add nearly the same amount to all three channels; for example,
+            // (118, 209, 201) still has a cyan chromatic component of (0, 91, 83).
+            int targetNeutral = Math.Min(target.R, Math.Min(target.G, target.B));
+            int pixelNeutral = Math.Min(color.R, Math.Min(color.G, color.B));
+            int targetChromaSum = targetSum - (targetNeutral * 3);
+            int pixelChromaSum = pixelSum - (pixelNeutral * 3);
+
+            if (targetChromaSum == 0 || pixelChromaSum == 0)
+                return 0.0;
+
+            double targetRRatio = (double)(target.R - targetNeutral) / targetChromaSum;
+            double targetGRatio = (double)(target.G - targetNeutral) / targetChromaSum;
+            double targetBRatio = (double)(target.B - targetNeutral) / targetChromaSum;
+
+            double pixelRRatio = (double)(color.R - pixelNeutral) / pixelChromaSum;
+            double pixelGRatio = (double)(color.G - pixelNeutral) / pixelChromaSum;
+            double pixelBRatio = (double)(color.B - pixelNeutral) / pixelChromaSum;
+
+            double distance = RatioDistance(
+                pixelRRatio, pixelGRatio, pixelBRatio,
+                targetRRatio, targetGRatio, targetBRatio);
+
+            double maxDistance = Math.Sqrt(2.0);
+            return Math.Clamp(1.0 - distance / maxDistance, 0.0, 1.0);
+        }
+
+        private double IsBaselineColor(Rgba32 color)
+        {
+            return MatchColor(color, new Rgba32(127, 255, 255));
+        }
+
+        private double IsCurveColor(Rgba32 color)
+        {
+            //(186,85,211) #BA55D3
+            //return MatchColor(color, new Rgba32(186, 85, 211));
+            return MatchColor(color, new Rgba32(189, 81, 167));
+        }
+
+        private double IsMarkerColor(Rgba32 color)
+        {
+            //(0,255,255) #00FFFF
+            return MatchColor(color, new Rgba32(0, 255, 255));
+        }
+        /*
         private void GetCurves()
         {
             Curves.Clear();
@@ -326,37 +573,6 @@ namespace SignalVision
                 new Rectangle(0, 0, image.Width, image.Height));
             if (scanBounds.IsEmpty)
                 return;
-
-            bool IsCurvePixel(Rgba32 pixel)
-            {
-                bool isTealCurveColor = IsColorWithinTolerance(pixel, TealCurveColor);
-                bool isTealCurveAlternateColor = IsColorWithinTolerance(pixel, TealCurveAlternateColor);
-                bool isPurpleCurveColor = IsPurpleCurveColor(pixel);// IsColorWithinTolerance(pixel, PurpleCurveColor);
-
-                return isTealCurveColor || isTealCurveAlternateColor || isPurpleCurveColor;
-            }
-
-            bool IsPurpleCurveColor(Rgba32 pixel)
-            {
-                bool flag = IsColorWithinTolerance(pixel, PurpleCurveColor);
-                if (flag) return flag;
-
-                int purpleCurveColorSum=PurpleCurveColor.R + PurpleCurveColor.G + PurpleCurveColor.B;
-                int pixelSum = pixel.R + pixel.G + pixel.B;
-                if (pixelSum < 100 || pixelSum > 400) return false;
-                float purpleR= (float)PurpleCurveColor.R / purpleCurveColorSum;
-                float purpleG = (float)PurpleCurveColor.G / purpleCurveColorSum;
-                float purpleB = (float)PurpleCurveColor.B / purpleCurveColorSum;
-                float pixelR = (float)pixel.R / pixelSum;
-                float pixelG = (float)pixel.G / pixelSum;
-                float pixelB = (float)pixel.B / pixelSum;
-                float deltaR = Math.Abs(purpleR - pixelR);
-                float deltaG = Math.Abs(purpleG - pixelG);
-                float deltaB = Math.Abs(purpleB - pixelB);
-                float tolerance = 0.2f; // Adjust this value as needed
-
-                return deltaR < tolerance && deltaG < tolerance && deltaB < tolerance;
-            }
 
             // First retain every complete vertical bar of curve-colored pixels.
             // Keeping the top and bottom is important: a midpoint alone cannot tell
@@ -481,89 +697,122 @@ namespace SignalVision
                 }
             }
 
+            // Keep the first teal curve and the curves following it up to, but not
+            // including, the second teal curve.
+            TrimCurvesToFirstTealSection();
+
             // Curve detection is complete. Write one CSV for this graph using
             // graph-relative X/Y coordinates.
             WriteCurvesToCsv(scanBounds.Width);
+        }*/
 
-            static bool IsColorWithinTolerance(Rgba32 pixel, Rgba32 target)
-            {
-                if (pixel.A == 0)
-                    return false;
+        private static bool IsColorWithinTolerance(Rgba32 pixel, Rgba32 target)
+        {
+            if (pixel.A == 0)
+                return false;
 
-                int redDifference = pixel.R - target.R;
-                int greenDifference = pixel.G - target.G;
-                int blueDifference = pixel.B - target.B;
+            int redDifference = pixel.R - target.R;
+            int greenDifference = pixel.G - target.G;
+            int blueDifference = pixel.B - target.B;
 
-                // Measure the pixel's overall RGB distance from the target color.
-                // Comparing the squared values avoids a square-root operation for
-                // every scanned pixel while producing the same pass/fail result.
-                int squaredColorDistance =
-                    (redDifference * redDifference) +
-                    (greenDifference * greenDifference) +
-                    (blueDifference * blueDifference);
-                int squaredTolerance =
-                    CurveColorTolerance * CurveColorTolerance;
+            // Measure the pixel's overall RGB distance from the target color.
+            // Comparing the squared values avoids a square-root operation for
+            // every scanned pixel while producing the same pass/fail result.
+            int squaredColorDistance =
+                (redDifference * redDifference) +
+                (greenDifference * greenDifference) +
+                (blueDifference * blueDifference);
+            int squaredTolerance =
+                CurveColorTolerance * CurveColorTolerance;
 
-                return squaredColorDistance <= squaredTolerance;
-            }
+            return squaredColorDistance <= squaredTolerance;
+        }
+        /*
+        private static int GetOverlap(
+            GraphVerticalRange first,
+            GraphVerticalRange second)
+        {
+            return Math.Max(
+                0,
+                Math.Min(first.ToY, second.ToY) -
+                Math.Max(first.FromY, second.FromY) + 1);
+        }
 
-            static int GetOverlap(
-                GraphVerticalRange first,
-                GraphVerticalRange second)
-            {
-                return Math.Max(
-                    0,
-                    Math.Min(first.ToY, second.ToY) -
-                    Math.Max(first.FromY, second.FromY) + 1);
-            }
+        private static int GetGap(
+            GraphVerticalRange first,
+            GraphVerticalRange second)
+        {
+            if (first.ToY < second.FromY)
+                return second.FromY - first.ToY;
+            if (second.ToY < first.FromY)
+                return first.FromY - second.ToY;
+            return 0;
+        }
 
-            static int GetGap(
-                GraphVerticalRange first,
-                GraphVerticalRange second)
-            {
-                if (first.ToY < second.FromY)
-                    return second.FromY - first.ToY;
-                if (second.ToY < first.FromY)
-                    return first.FromY - second.ToY;
-                return 0;
-            }
+        private static long GetEndpointDistanceSquared(
+            GraphVerticalRange first,
+            GraphVerticalRange second)
+        {
+            long xDistance = second.X - first.X;
+            long yDistance = GetMidpointYDifference(first, second);
 
-            static long GetEndpointDistanceSquared(
-                GraphVerticalRange first,
-                GraphVerticalRange second)
-            {
-                long xDistance = second.X - first.X;
-                long yDistance = GetMidpointYDifference(first, second);
+            // Squared Euclidean distance gives the same ordering without
+            // calculating a square root for every curve/bar candidate.
+            return (xDistance * xDistance) + (yDistance * yDistance);
+        }
 
-                // Squared Euclidean distance gives the same ordering without
-                // calculating a square root for every curve/bar candidate.
-                return (xDistance * xDistance) + (yDistance * yDistance);
-            }
+        private static int GetMidpointYDifference(
+            GraphVerticalRange first,
+            GraphVerticalRange second)
+        {
+            int firstMidpoint = (first.FromY + first.ToY) / 2;
+            int secondMidpoint = (second.FromY + second.ToY) / 2;
+            return Math.Abs(secondMidpoint - firstMidpoint);
+        }
 
-            static int GetMidpointYDifference(
-                GraphVerticalRange first,
-                GraphVerticalRange second)
-            {
-                int firstMidpoint = (first.FromY + first.ToY) / 2;
-                int secondMidpoint = (second.FromY + second.ToY) / 2;
-                return Math.Abs(secondMidpoint - firstMidpoint);
-            }
+        private static string GetCurveColor(Rgba32 pixel)
+        {
+            int ColorDistance(Rgba32 target) =>
+                Math.Abs(pixel.R - target.R) +
+                Math.Abs(pixel.G - target.G) +
+                Math.Abs(pixel.B - target.B);
 
-            static string GetCurveColor(Rgba32 pixel)
-            {
-                int ColorDistance(Rgba32 target) =>
-                    Math.Abs(pixel.R - target.R) +
-                    Math.Abs(pixel.G - target.G) +
-                    Math.Abs(pixel.B - target.B);
+            // The two teal shades represent the same logical curve color.
+            int tealDistance = Math.Min(
+                ColorDistance(TealCurveColor),
+                ColorDistance(TealCurveAlternateColor));
+            int purpleDistance = ColorDistance(PurpleCurveColor);
+            return tealDistance <= purpleDistance
+                ? TealCurveHexColor
+                : "#d933c3";
+        }
 
-                // The two teal shades represent the same logical curve color.
-                int tealDistance = Math.Min(
-                    ColorDistance(TealCurveColor),
-                    ColorDistance(TealCurveAlternateColor));
-                int purpleDistance = ColorDistance(PurpleCurveColor);
-                return tealDistance <= purpleDistance ? "#a6ece1" : "#d933c3";
-            }
+        private void TrimCurvesToFirstTealSection()
+        {
+            int firstTealIndex = Curves.FindIndex(curve =>
+                string.Equals(
+                    curve.Color,
+                    TealCurveHexColor,
+                    StringComparison.OrdinalIgnoreCase));
 
+            // Leave the detected curves intact if no teal boundary was found.
+            if (firstTealIndex < 0)
+                return;
+
+            int secondTealIndex = Curves.FindIndex(
+                firstTealIndex + 1,
+                curve => string.Equals(
+                    curve.Color,
+                    TealCurveHexColor,
+                    StringComparison.OrdinalIgnoreCase));
+
+            // Removing from the second teal through the end also removes the
+            // second teal boundary itself.
+            if (secondTealIndex >= 0)
+                Curves.RemoveRange(secondTealIndex, Curves.Count - secondTealIndex);
+
+            if (firstTealIndex > 0)
+                Curves.RemoveRange(0, firstTealIndex);
         }
 
         private void WriteCurvesToCsv(int graphWidth)
@@ -598,7 +847,7 @@ namespace SignalVision
                 }
                 writer.WriteLine();
             }
-        }
+        }*/
 
     }
 }
