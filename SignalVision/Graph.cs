@@ -47,6 +47,7 @@ namespace SignalVision
             ApplyBilateralFilter();
             Sanitize();
             SaveDataBounds(Path.Combine(OutputFolder, $"databounds_page_{PageNumber}_image_{ImageIndex}_panel_{PanelIndex}_Data_{Index}.png"));//TODO:
+            //GetCurves3();
             GetCurves2();
             //GetCurves();
             //Console.WriteLine("done");
@@ -308,6 +309,160 @@ namespace SignalVision
             return deltaR < tolerance && deltaG < tolerance && deltaB < tolerance;
         }
 
+        private void GetCurves3()
+        {
+            Curves.Clear();
+            Image<Rgba32>? image = SanitizedImage;
+            if (image is null || DataBounds.IsEmpty)
+                return;
+
+            Rectangle scanBounds = Rectangle.Intersect(DataBounds, new Rectangle(0, 0, image.Width, image.Height));
+            if (scanBounds.IsEmpty)
+                return;
+
+            double[,,] colorLikenessScores = new double[scanBounds.Width, scanBounds.Height, 3]; // 0: baseline, 1: curve, 2: marker]
+
+
+            for (int x = scanBounds.Left; x < scanBounds.Right; x++)
+            {
+                for (int y = scanBounds.Top; y < scanBounds.Bottom; y++)
+                {
+                    Rgba32 color = image[x, y];
+                    double baselineLikeness=ColorLikeness(color.R, color.G, color.B, 127, 255, 255);
+                    double curveLikeness = ColorLikeness(color.R, color.G, color.B, 189, 81, 167);
+                    double markerLikeness = ColorLikeness(color.R, color.G, color.B, 0, 255, 255);
+
+                    colorLikenessScores[x - scanBounds.Left, y - scanBounds.Top, 0] = baselineLikeness;
+                    colorLikenessScores[x - scanBounds.Left, y - scanBounds.Top, 1] = curveLikeness;
+                    colorLikenessScores[x - scanBounds.Left, y - scanBounds.Top, 2] = markerLikeness;
+                }
+            }
+
+            for (int x = 0; x < scanBounds.Width; x++)
+            {
+                for (int y = 0; y < scanBounds.Height; y++)
+                {
+                    if (x == 0)
+                    {
+                        if (colorLikenessScores[x, y, 0] > 0.8)
+                        {
+                            GraphPixel pixel = new()
+                            {
+                                X = x + scanBounds.Left,
+                                Y = y + scanBounds.Top,
+                                Color = image[x + scanBounds.Left, y + scanBounds.Top],
+                                Distance = colorLikenessScores[x, y, 0],
+                                ColorName = "Baseline"
+                            };
+                            if (Curves.Count > 0 && Curves.Last().VerticalRanges.Last().Pixels.Last().Y + 1 == pixel.Y)
+                            {
+                                Curves.Last().VerticalRanges.Last().Pixels.Add(pixel);
+                            }
+                            else
+                            {
+                                GraphVerticalRange bar = new(pixel);
+                                Curve curve = new(bar);
+                                Curves.Add(curve);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Console.WriteLine("test");
+        }
+
+        public static double ColorLikeness(
+            byte r, byte g, byte b,
+            byte targetR, byte targetG, byte targetB)
+        {
+            // -------------------------
+            // 1. Magnitude / brightness
+            // -------------------------
+            double magnitude = Math.Sqrt(
+                r * r +
+                g * g +
+                b * b);
+
+            double targetMagnitude = Math.Sqrt(
+                targetR * targetR +
+                targetG * targetG +
+                targetB * targetB);
+
+            if (targetMagnitude == 0)
+                return 0;
+
+            // Extremely dark pixels should have very low confidence.
+            // Relative brightness compared with target.
+            double brightnessRatio = magnitude / targetMagnitude;
+
+            double brightnessScore;
+
+            if (brightnessRatio < 0.10)
+            {
+                brightnessScore = 0;
+            }
+            else if (brightnessRatio < 0.30)
+            {
+                // Gradually increase from 0 -> 1
+                brightnessScore =
+                    (brightnessRatio - 0.10) / 0.20;
+            }
+            else if (brightnessRatio <= 1.10)
+            {
+                brightnessScore = 1.0;
+            }
+            else if (brightnessRatio < 1.50)
+            {
+                // Gradually penalize pixels that are too bright
+                brightnessScore =
+                    (1.50 - brightnessRatio) / 0.40;
+            }
+            else
+            {
+                brightnessScore = 0;
+            }
+
+            // -------------------------
+            // 2. Color direction
+            // -------------------------
+            if (magnitude == 0)
+                return 0;
+
+            double dot =
+                r * targetR +
+                g * targetG +
+                b * targetB;
+
+            double cosine =
+                dot / (magnitude * targetMagnitude);
+
+            cosine = Math.Clamp(cosine, 0.0, 1.0);
+
+            // Make mediocre color matches fall off faster.
+            double colorScore = Math.Pow(cosine, 8);
+
+
+            // -------------------------
+            // 3. Chroma
+            // -------------------------
+            int max = Math.Max(r, Math.Max(g, b));
+            int min = Math.Min(r, Math.Min(g, b));
+
+            double chroma = max - min;
+
+            // Gray-ish pixels should score lower.
+            double chromaScore = Math.Clamp(chroma / 30.0, 0.0, 1.0);
+
+
+            // -------------------------
+            // Final likeness
+            // -------------------------
+            return colorScore *
+                   brightnessScore *
+                   chromaScore;
+        }
+
         private void GetCurves2()
         {
             Curves.Clear();
@@ -319,174 +474,11 @@ namespace SignalVision
             if (scanBounds.IsEmpty)
                 return;
 
-            for (int x = scanBounds.Left; x < scanBounds.Right; x++)
-            {
-                List<GraphVerticalRange> columnBars = [];
-                for (int y = scanBounds.Top; y < scanBounds.Bottom; y++)
-                {
-                    Rgba32 color = image[x, y];
-                    string colorName = "Unknown";
+            string csvPath = Path.Combine(
+                OutputFolder,
+                $"curves_page_{PageNumber}_image_{ImageIndex}_panel_{PanelIndex}_Data_{Index}.csv");
 
-                    if (x == 10 && y == 335)
-                    {
-                        Console.WriteLine("test");//TODO:
-                    }
-
-                    double baselineScore = IsBaselineColor(color);
-                    double curveScore = IsCurveColor(color);
-                    double markerScore = IsMarkerColor(color);
-                    if (baselineScore > 0.90 || (baselineScore > 0.80 && markerScore > 0.80))
-                        colorName = "Baseline";
-                    else if (curveScore > 0.90 || (curveScore > 0.80 && markerScore > 0.80))
-                        colorName = "Curve";
-                    else if (markerScore > 0.90)
-                        colorName = "Marker";
-
-                    if (colorName != "Unknown")
-                    {
-                        GraphPixel pixel = new()
-                        {
-                            X = x,
-                            Y = y,
-                            Color = color,
-                            Distance = baselineScore,
-                            ColorName = colorName
-                        };
-                        if (columnBars.Count > 0)
-                        {
-                            GraphVerticalRange lastBar = columnBars[^1];
-                            GraphPixel lastPixel = lastBar.Pixels[^1];
-                            if (lastPixel.Y + 1 == y && lastPixel.ColorName == pixel.ColorName)
-                            {
-                                lastBar.Add(pixel);
-                            }
-                            else
-                            {
-                                GraphVerticalRange graphPixels = new(pixel);
-                                columnBars.Add(graphPixels);
-                            }
-                        }
-                        else
-                        {
-                            GraphVerticalRange graphPixels = new(pixel);
-                            columnBars.Add(graphPixels);
-                        }
-                    }
-                }
-
-                if (columnBars.Count != 2)
-                {
-                    Console.WriteLine($"Column {x} has {columnBars.Count} bars");//TODO:
-                }
-                if (x == 109)
-                {
-                    Console.WriteLine("test");//TODO:
-                }
-
-                if (x == scanBounds.Left)
-                {
-                    foreach(GraphVerticalRange bar in columnBars)
-                    {
-                        Curve curve = new(bar);
-                        Curves.Add(curve);
-                    }
-                }
-                else
-                {
-                    foreach (GraphVerticalRange bar in columnBars)
-                    {
-                        if (bar.Pixels[0].X==12 && bar.Pixels[0].Y == 337)
-                        {
-                            Console.WriteLine("test");//TODO:
-                        }
-                        Curve? nearestCurve = null;
-                        int longestBarLength = -1;
-                        int bestOverlap = -1;
-                        int bestYGap = int.MaxValue;
-                        int bestXGap = int.MaxValue;
-
-                        int barTop = bar.Pixels[0].Y;
-                        int barBottom = bar.Pixels[^1].Y;
-
-                        foreach (Curve curve in Curves)
-                        {
-                            GraphVerticalRange lastBar = curve.VerticalRanges[^1];
-                            if (curve.VerticalRanges.Count==2 && curve.VerticalRanges[0].Pixels[0].X==8 && curve.VerticalRanges[0].Pixels[0].Y == 339)
-                            {
-                                Console.WriteLine("test");//TODO:
-                            }
-
-                            // Allow the curve to bridge columns whose bar was lost to
-                            // JPEG compression. The most recent bar must still be to
-                            // the left, which also prevents two bars at the same X
-                            // coordinate from attaching to one curve.
-                            int xGap = x - lastBar.Pixels[0].X;
-                            if (xGap < 1 || xGap > MaximumReconnectXDifference)
-                                continue;
-
-                            int lastTop = lastBar.Pixels[0].Y;
-                            int lastBottom = lastBar.Pixels[^1].Y;
-
-                            // Number of shared Y coordinates, inclusive.
-                            int overlap = Math.Max(
-                                0,
-                                Math.Min(barBottom, lastBottom) -
-                                Math.Max(barTop, lastTop) + 1);
-
-                            // Distance between the two vertical ranges.
-                            int yGap;
-                            if (overlap > 0)
-                            {
-                                yGap = 0;
-                            }
-                            else if (barBottom < lastTop)
-                            {
-                                yGap = lastTop - barBottom;
-                            }
-                            else
-                            {
-                                yGap = barTop - lastBottom;
-                            }
-
-                            if (overlap == 0 &&
-                                yGap > MaximumReconnectYDifference)
-                            {
-                                continue;
-                            }
-
-                            int lastBarLength = lastBar.Pixels.Count;
-
-                            if (overlap > bestOverlap ||
-                                (overlap == bestOverlap && yGap < bestYGap) ||
-                                (overlap == bestOverlap &&
-                                 yGap == bestYGap &&
-                                 xGap < bestXGap) ||
-                                (overlap == bestOverlap &&
-                                 yGap == bestYGap &&
-                                 xGap == bestXGap &&
-                                 lastBarLength > longestBarLength))
-                            {
-                                nearestCurve = curve;
-                                longestBarLength = lastBarLength;
-                                bestOverlap = overlap;
-                                bestYGap = yGap;
-                                bestXGap = xGap;
-                            }
-                        }
-
-                        if (nearestCurve is not null)
-                        {
-                            nearestCurve.VerticalRanges.Add(bar);
-                        }
-                        else if (x-5 < scanBounds.Left)
-                        {
-                            // Optional: start a new curve when no previous-column match exists.
-                            Curves.Add(new Curve(bar));
-                        }
-                    }
-                }
-            }
-            Console.WriteLine($"test");
+            Curves.AddRange(DataBoundsCsvGenerator.Generate(image, scanBounds, csvPath));
         }
 
         public static double RatioDistance(double r1, double g1, double b1, double r2, double g2, double b2)
@@ -501,65 +493,6 @@ namespace SignalVision
                 db * db);
         }
 
-        private double MatchColor(Rgba32 color, Rgba32 target)
-        {
-            int targetSum = target.R + target.G + target.B;
-            int pixelSum = color.R + color.G + color.B;
-
-            if (targetSum == 0 || pixelSum == 0)
-                return color.Equals(target) ? 1.0 : 0.0;
-
-            // Filter pixels whose overall brightness differs too much.
-            double brightnessDelta = Math.Abs(pixelSum - targetSum) / (255.0 * 3.0);
-
-            const double maxBrightnessDelta = 0.12; // Tune between 0.08–0.15
-            if (brightnessDelta > maxBrightnessDelta)
-                return 0.0;
-
-            // Remove the neutral component before comparing hue. Anti-aliasing can
-            // add nearly the same amount to all three channels; for example,
-            // (118, 209, 201) still has a cyan chromatic component of (0, 91, 83).
-            int targetNeutral = Math.Min(target.R, Math.Min(target.G, target.B));
-            int pixelNeutral = Math.Min(color.R, Math.Min(color.G, color.B));
-            int targetChromaSum = targetSum - (targetNeutral * 3);
-            int pixelChromaSum = pixelSum - (pixelNeutral * 3);
-
-            if (targetChromaSum == 0 || pixelChromaSum == 0)
-                return 0.0;
-
-            double targetRRatio = (double)(target.R - targetNeutral) / targetChromaSum;
-            double targetGRatio = (double)(target.G - targetNeutral) / targetChromaSum;
-            double targetBRatio = (double)(target.B - targetNeutral) / targetChromaSum;
-
-            double pixelRRatio = (double)(color.R - pixelNeutral) / pixelChromaSum;
-            double pixelGRatio = (double)(color.G - pixelNeutral) / pixelChromaSum;
-            double pixelBRatio = (double)(color.B - pixelNeutral) / pixelChromaSum;
-
-            double distance = RatioDistance(
-                pixelRRatio, pixelGRatio, pixelBRatio,
-                targetRRatio, targetGRatio, targetBRatio);
-
-            double maxDistance = Math.Sqrt(2.0);
-            return Math.Clamp(1.0 - distance / maxDistance, 0.0, 1.0);
-        }
-
-        private double IsBaselineColor(Rgba32 color)
-        {
-            return MatchColor(color, new Rgba32(127, 255, 255));
-        }
-
-        private double IsCurveColor(Rgba32 color)
-        {
-            //(186,85,211) #BA55D3
-            //return MatchColor(color, new Rgba32(186, 85, 211));
-            return MatchColor(color, new Rgba32(189, 81, 167));
-        }
-
-        private double IsMarkerColor(Rgba32 color)
-        {
-            //(0,255,255) #00FFFF
-            return MatchColor(color, new Rgba32(0, 255, 255));
-        }
         /*
         private void GetCurves()
         {

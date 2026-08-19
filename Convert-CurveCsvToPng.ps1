@@ -90,6 +90,15 @@ if ($maxY -lt 0) {
 
 Add-Type -AssemblyName System.Drawing
 
+# Current CSV exports store the detected curve category in the Color column
+# instead of an HTML/RGB value. Keep these colors aligned with Graph.cs, while
+# continuing to support older exports containing HTML color values.
+$categoryColors = @{
+    Baseline = '#7fffff'
+    Curve    = '#bd51a7'
+    Marker   = '#00ffff'
+}
+
 $width = [int]($maxX + 1 + (2 * $Padding))
 $height = [int]($maxY + 1 + (2 * $Padding))
 $bitmap = [System.Drawing.Bitmap]::new($width, $height)
@@ -110,21 +119,28 @@ try {
     $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::None
 
     foreach ($row in $rows) {
-        $colorText = [string]$row.Color
-        if ([string]::IsNullOrWhiteSpace($colorText)) {
+        $colorValue = ([string]$row.Color).Trim()
+        if ([string]::IsNullOrWhiteSpace($colorValue)) {
             throw "A curve row has no Color value."
         }
 
-        if (-not $pens.ContainsKey($colorText)) {
+        if (-not $pens.ContainsKey($colorValue)) {
+            $colorText = if ($categoryColors.ContainsKey($colorValue)) {
+                $categoryColors[$colorValue]
+            }
+            else {
+                $colorValue
+            }
+
             try {
                 $color = [System.Drawing.ColorTranslator]::FromHtml($colorText)
             }
             catch {
-                throw "Color '$colorText' is not a valid HTML color."
+                throw "Color '$colorValue' is not a recognized curve category or valid HTML color."
             }
-            $pens[$colorText] = [System.Drawing.Pen]::new($color, $LineWidth)
+            $pens[$colorValue] = [System.Drawing.Pen]::new($color, $LineWidth)
         }
-        $pen = $pens[$colorText]
+        $pen = $pens[$colorValue]
         $previousPoint = $null
 
         foreach ($column in $xColumns) {
