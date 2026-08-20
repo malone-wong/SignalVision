@@ -478,7 +478,53 @@ namespace SignalVision
                 OutputFolder,
                 $"curves_page_{PageNumber}_image_{ImageIndex}_panel_{PanelIndex}_Data_{Index}.csv");
 
-            Curves.AddRange(DataBoundsCsvGenerator.Generate(image, scanBounds, csvPath));
+            Curves.AddRange(DataBoundsCsvGenerator.Generate(
+                image,
+                scanBounds,
+                csvPath,
+                GetTextRegions(image, scanBounds)));
+        }
+
+        /// <summary>
+        /// Locates the labels printed inside the plot, such as "(BL) 09:07:11".
+        /// </summary>
+        /// <remarks>
+        /// These are drawn in the same pale teal as the baseline trace and sit
+        /// on top of it, so curve extraction needs to know where they are to
+        /// avoid reporting a label as a curve. Coordinates are returned in the
+        /// source image's space to match <paramref name="scanBounds"/>.
+        /// </remarks>
+        private IReadOnlyList<OcrTextRegion> GetTextRegions(
+            Image<Rgba32> image,
+            Rectangle scanBounds)
+        {
+            try
+            {
+                using Image<Rgba32> plotArea = image.Clone(context => context.Crop(scanBounds));
+                IReadOnlyList<OcrTextRegion> regions = OCRHelper.DetectTextRegions(
+                    plotArea,
+                    Parent.Parent.Config,
+                    Parent.Logger.WithTag("Graph labels"));
+
+                return regions
+                    .Select(region => new OcrTextRegion
+                    {
+                        Text = region.Text,
+                        Bounds = new Rectangle(
+                            region.Bounds.X + scanBounds.Left,
+                            region.Bounds.Y + scanBounds.Top,
+                            region.Bounds.Width,
+                            region.Bounds.Height),
+                    })
+                    .ToList();
+            }
+            catch (Exception exception)
+            {
+                // Label detection only refines extraction, so a failure here
+                // must not cost us the curves.
+                Parent.Logger.Warn($"Graph label detection failed: {exception.Message}");
+                return [];
+            }
         }
 
         public static double RatioDistance(double r1, double g1, double b1, double r2, double g2, double b2)

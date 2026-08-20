@@ -85,6 +85,108 @@ namespace SignalVision
             }
         }
 
+        /// <summary>
+        /// Locates the text blocks in an image and reports them in the source
+        /// image's own coordinates.
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="ExtractTextFromImage"/> this uses a single scaled
+        /// pass rather than overlapping sections, because overlapping sections
+        /// would report the same word at two different offsets. Detection
+        /// failures are logged rather than thrown: callers use this to refine
+        /// curve extraction, which must still work when no text is found.
+        /// </remarks>
+        public static IReadOnlyList<OcrTextRegion> DetectTextRegions(
+            Image<Rgba32> imageSharpImage,
+            Config config,
+            Logger logger)
+        {
+            ArgumentNullException.ThrowIfNull(imageSharpImage);
+
+            try
+            {
+                OcrEngine? ocrEngine = OcrEngine.TryCreateFromUserProfileLanguages();
+                if (ocrEngine is null)
+                {
+                    logger.Warn("Failed to initialize the OCR engine for text detection.");
+                    return [];
+                }
+
+                int maxContentDimension = Math.Max(
+                    1,
+                    config.OCRMaxPreparedDimension - (PreparedPadding * 2));
+                double scale = Math.Min(
+                    Math.Max(1, config.OCRScale),
+                    (double)maxContentDimension /
+                        Math.Max(imageSharpImage.Width, imageSharpImage.Height));
+                if (scale < 1.0)
+                    scale = 1.0;
+
+                using Image<Rgba32> prepared = imageSharpImage.Clone();
+                if (scale > 1.0)
+                {
+                    prepared.Mutate(context => context.Resize(
+                        Math.Max(1, (int)Math.Round(imageSharpImage.Width * scale)),
+                        Math.Max(1, (int)Math.Round(imageSharpImage.Height * scale)),
+                        KnownResamplers.Lanczos3));
+                }
+
+                prepared.Mutate(context => context.Pad(
+                    prepared.Width + (PreparedPadding * 2),
+                    prepared.Height + (PreparedPadding * 2),
+                    Color.Black));
+
+                using MemoryStream memoryStream = new();
+                prepared.SaveAsPng(memoryStream);
+
+                using InMemoryRandomAccessStream winRtStream = new();
+                using DataWriter writer = new(winRtStream.GetOutputStreamAt(0));
+                writer.WriteBytes(memoryStream.ToArray());
+                writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+                writer.FlushAsync().AsTask().GetAwaiter().GetResult();
+                winRtStream.Seek(0);
+
+                BitmapDecoder decoder = BitmapDecoder.CreateAsync(winRtStream)
+                    .AsTask().GetAwaiter().GetResult();
+                using SoftwareBitmap softwareBitmap = decoder.GetSoftwareBitmapAsync()
+                    .AsTask().GetAwaiter().GetResult();
+
+                OcrResult result = ocrEngine.RecognizeAsync(softwareBitmap)
+                    .AsTask().GetAwaiter().GetResult();
+
+                List<OcrTextRegion> regions = [];
+                foreach (OcrLine line in result.Lines)
+                {
+                    foreach (OcrWord word in line.Words)
+                    {
+                        int left = (int)Math.Floor((word.BoundingRect.Left - PreparedPadding) / scale);
+                        int top = (int)Math.Floor((word.BoundingRect.Top - PreparedPadding) / scale);
+                        int right = (int)Math.Ceiling((word.BoundingRect.Right - PreparedPadding) / scale);
+                        int bottom = (int)Math.Ceiling((word.BoundingRect.Bottom - PreparedPadding) / scale);
+
+                        Rectangle bounds = Rectangle.Intersect(
+                            Rectangle.FromLTRB(left, top, right, bottom),
+                            new Rectangle(0, 0, imageSharpImage.Width, imageSharpImage.Height));
+                        if (bounds.Width <= 0 || bounds.Height <= 0)
+                            continue;
+
+                        regions.Add(new OcrTextRegion
+                        {
+                            Text = word.Text ?? string.Empty,
+                            Bounds = bounds,
+                        });
+                    }
+                }
+
+                return regions;
+            }
+            catch (Exception ex)
+            {
+                logger.Warn($"Windows OCR text detection failed: {ex.Message}");
+                return [];
+            }
+        }
+
         private static string RecognizeBestVariant(Image<Rgba32> image, OcrEngine ocrEngine)
         {
             string bestText = Recognize(image, ocrEngine);

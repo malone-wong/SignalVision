@@ -3,21 +3,44 @@ using SignalVision;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
+const int OcrScale = 5;
+const int OcrMaximumPreparedDimension = 2400;
+
 if (args.Any(argument => argument is "-h" or "--help" or "/?"))
 {
     PrintUsage();
     return 0;
 }
 
-if (args.Length > 2)
+bool detectLabels = true;
+List<string> positional = [];
+foreach (string argument in args)
+{
+    if (string.Equals(argument, "--no-labels", StringComparison.OrdinalIgnoreCase))
+    {
+        detectLabels = false;
+        continue;
+    }
+
+    if (argument.StartsWith('-'))
+    {
+        Console.Error.WriteLine($"Unknown option: {argument}");
+        PrintUsage();
+        return 2;
+    }
+
+    positional.Add(argument);
+}
+
+if (positional.Count > 2)
 {
     Console.Error.WriteLine("Too many arguments.");
     PrintUsage();
     return 2;
 }
 
-string inputPath = Path.GetFullPath(args.Length > 0 ? args[0] : Environment.CurrentDirectory);
-string? outputFolder = args.Length > 1 ? Path.GetFullPath(args[1]) : null;
+string inputPath = Path.GetFullPath(positional.Count > 0 ? positional[0] : Environment.CurrentDirectory);
+string? outputFolder = positional.Count > 1 ? Path.GetFullPath(positional[1]) : null;
 
 IReadOnlyList<string> inputImages;
 if (File.Exists(inputPath))
@@ -46,6 +69,12 @@ if (inputImages.Count == 0)
     return 1;
 }
 
+// SignalVision's config selects Paddle, and Paddle is the only provider that
+// needs no per-run configuration, so the standalone tool uses it directly.
+Logger logger = new(
+    "DataBoundsToCsv",
+    Path.Combine(outputFolder ?? Path.GetDirectoryName(inputImages[0])!, "DataBoundsToCsv.log"));
+
 int succeeded = 0;
 int failed = 0;
 foreach (string imagePath in inputImages)
@@ -63,7 +92,15 @@ foreach (string imagePath in inputImages)
     try
     {
         using Image<Rgba32> image = Image.Load<Rgba32>(imagePath);
-        List<Curve> curves = DataBoundsCsvGenerator.Generate(image, csvPath);
+        IReadOnlyList<OcrTextRegion>? textRegions = detectLabels
+            ? PaddleOCRHelper.DetectTextRegions(
+                image,
+                OcrScale,
+                OcrMaximumPreparedDimension,
+                logger)
+            : null;
+
+        List<Curve> curves = DataBoundsCsvGenerator.Generate(image, csvPath, textRegions);
         Console.WriteLine($"Created {csvPath} ({curves.Count} curves)");
         succeeded++;
     }
@@ -80,11 +117,15 @@ return failed == 0 ? 0 : 1;
 static void PrintUsage()
 {
     Console.WriteLine(
-        "Usage: DataBoundsToCsv [input-image-or-folder] [output-folder]\n" +
+        "Usage: DataBoundsToCsv [input-image-or-folder] [output-folder] [--no-labels]\n" +
         "\n" +
         "Reads databounds PNG images and creates curves CSV files using the same\n" +
         "curve extraction implementation as SignalVision. If no input is supplied,\n" +
         "the current folder is processed. Existing CSV files are replaced.\n" +
+        "\n" +
+        "  --no-labels  Skip OCR label detection. Labels printed inside the plot are\n" +
+        "               drawn in the same color as the baseline trace, so skipping\n" +
+        "               detection can report a label as an extra curve.\n" +
         "\n" +
         "Example:\n" +
         "  DataBoundsToCsv C:\\temp\\CaseSummaryData\\databounds_page_7_image_1_panel_18_Data_0.png\n" +
